@@ -351,4 +351,79 @@ public class TestRecursiveCte
                 """))
                 .matches("VALUES (ARRAY[0]), (ARRAY[0, 1]), (ARRAY[0, 1, 2]), (ARRAY[0, 1, 2, 3])");
     }
+
+    @Test
+    public void testTableFunctionInRecursiveCte()
+    {
+        // Zero-source table function (sequence) as the anchor of a recursive CTE.
+        // PlanCopier must support copying TableFunctionNode when
+        // QueryPlanner.planExpand() unrolls the recursion.
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(n) AS (
+                    SELECT sequential_number FROM TABLE(system.builtin.sequence(start => 1, stop => 3))
+                    UNION ALL
+                    SELECT n + 10 FROM t WHERE n < 10)
+                SELECT * FROM t
+                """))
+                .matches("VALUES (BIGINT '1'), (BIGINT '2'), (BIGINT '3'), (BIGINT '11'), (BIGINT '12'), (BIGINT '13')");
+
+        // Immediate termination: recursive step produces no rows
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(n) AS (
+                    SELECT sequential_number FROM TABLE(system.builtin.sequence(start => 1, stop => 3))
+                    UNION ALL
+                    SELECT n FROM t WHERE false)
+                SELECT * FROM t
+                """))
+                .matches("VALUES (BIGINT '1'), (BIGINT '2'), (BIGINT '3')");
+
+        // UNION DISTINCT instead of UNION ALL
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(n) AS (
+                    SELECT sequential_number FROM TABLE(system.builtin.sequence(start => 1, stop => 3))
+                    UNION
+                    SELECT n + 1 FROM t WHERE n < 4)
+                SELECT * FROM t
+                """))
+                .matches("VALUES (BIGINT '1'), (BIGINT '2'), (BIGINT '3'), (BIGINT '4')");
+    }
+
+    @Test
+    public void testTableFunctionInRecursiveCteDepthExceeded()
+    {
+        // Table function in a recursive CTE that exceeds the recursion depth limit.
+        // Should produce the standard depth-exceeded error, not an internal error
+        // from PlanCopier.
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(n) AS (
+                    SELECT sequential_number FROM TABLE(system.builtin.sequence(start => 1, stop => 1))
+                    UNION ALL
+                    SELECT n + 1 FROM t)
+                SELECT * FROM t
+                """))
+                .failure().hasMessageContaining("Recursion depth limit exceeded");
+    }
+
+    @Test
+    public void testTableFunctionWithTableArgumentInRecursiveCte()
+    {
+        // Table function with a TABLE input argument. Unlike sequence() (which has no
+        // sources), exclude_columns wraps a table scan, so node.getSources() is non-empty
+        // and PlanCopier must recursively rewrite the source children.
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(n) AS (
+                    SELECT a FROM TABLE(system.builtin.exclude_columns(
+                        input => TABLE(VALUES (1, 10), (2, 20)) x(a, b),
+                        columns => DESCRIPTOR(b)))
+                    UNION ALL
+                    SELECT n + 10 FROM t WHERE n < 10)
+                SELECT * FROM t
+                """))
+                .matches("VALUES (1), (2), (11), (12)");
+    }
 }
